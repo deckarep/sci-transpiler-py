@@ -153,13 +153,27 @@ class SexpCustomVisitor(sexpVisitor):
             self.processReturn(ctx.getChild(2))
         elif token == "if":
             #TODO: this is buggy, it's asumming that there isn't multiline if statements currently.
-            pdb.set_trace()
-            children = [c for c in ctx.getChildren()][1:-1]
+
+            # 1. Find if we have an else clause
+            elseIdx = -1
+            for i in range(0, ctx.getChildCount()):
+                c = ctx.getChild(i)
+                if isinstance(c, sexpParser.ItemContext) and c.getChildCount() == 1:
+                    # This is a single item, so check if it's an else clause.
+                    if c.getChild(0).getText() == "else":
+                        elseIdx = i
+                        break
+            
+            children = [c for c in ctx.getChildren()]
+            
+            # Grab condition right after if token
             cond_expr = ctx.getChild(2)
-            trueBody = ctx.getChild(3)
-            optionalFalseBody = None if len(children) == 3 else ctx.getChild(5)
-            #pdb.set_trace()
-            return self.processIf(cond_expr, trueBody, optionalFalseBody)
+            # Grab all true statements up until the else clause
+            true_stmts = children[3:elseIdx] if elseIdx != -1 else children[3:-1]
+            # Grab all false statements after the else clause (if present)
+            optional_false_stmts = children[elseIdx + 1:-1] if elseIdx != -1 else []
+            
+            return self.processIf(cond_expr, true_stmts, optional_false_stmts)
         elif token == "break":
             self.emit("break #sci:break")
         elif token == "breakif":
@@ -467,7 +481,7 @@ class SexpCustomVisitor(sexpVisitor):
                 self.indent_lvl -= 1
             self.indent_lvl -= 1
 
-    def processIf(self, cond_expr, trueBody, optionalFalseBody):
+    def processIf(self, cond_expr, true_stmts, optional_false_stmts):
         if self.peekCtx() == ContextKind.EXPR:
             # TODO: Expression needs to be handled in various styles
             # 1. Use Python3 ternary when the trueBody or elseBody is a single result expression (one line).
@@ -477,7 +491,8 @@ class SexpCustomVisitor(sexpVisitor):
             # 1. SCI if-expression => Python3 ternary expression
             # TODO: Python3 expression MUST have an else clause.
             # I need to figure out what to do when an else is not used.
-            assert(optionalFalseBody is not None, "Python3 if expression form requires an else body")
+            assert(len(true_stmts) == 1, "Python3 if expression form requires a single statement")
+            assert(len(optional_false_stmts) == 1, "Python3 if expression form requires an else clause")
 
             # First, hoist out side-effect type operators out of cond_expr.
             hoisted_stmts, modified_expr = self.maybeHoistSideEffectsFromExpr(cond_expr)
@@ -485,7 +500,9 @@ class SexpCustomVisitor(sexpVisitor):
                 for stmt in hoisted_stmts:
                     self.emit(stmt + " # side-effect op hoisted up as statement")
 
-            return "({} if {} else {})".format(self.visit(trueBody), modified_expr, self.visit(optionalFalseBody))
+            a = true_stmts[0]
+            b = optional_false_stmts[0]
+            return "({} if {} else {})".format(self.visit(a), modified_expr, self.visit(b))
 
             # 2. SCI if-expression => Python3 if-else statement due to multiple statements!
             # TODO
@@ -497,12 +514,15 @@ class SexpCustomVisitor(sexpVisitor):
                     self.emit(stmt + " # side-effect op hoisted up as statement")
             self.emit("if {}:".format(new_cond_expr))
             self.indent_lvl += 1
-            self.emit(self.visit(trueBody))
+            for stmt in true_stmts:
+                self.emit(self.visit(stmt))
             self.indent_lvl -= 1
-            if optionalFalseBody is not None:
+
+            if optional_false_stmts:
                 self.emit("else:")
                 self.indent_lvl += 1
-                self.emit(self.visit(optionalFalseBody))
+                for stmt in optional_false_stmts:
+                    self.emit(self.visit(stmt))
                 self.indent_lvl -= 1
         
     def processReturn(self, optionalExp):

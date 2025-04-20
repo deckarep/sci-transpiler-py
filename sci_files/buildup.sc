@@ -75,6 +75,13 @@
         )
         (if (not elements)
 	        (= elements (NewList))
+            (if (not elements)
+	            (= elements (NewList))
+            else
+                (= x (+ 2 x))
+	        )
+        else
+            (= x (+ 2 x))
 	    )
     )
 
