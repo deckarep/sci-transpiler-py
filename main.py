@@ -434,25 +434,29 @@ class SexpCustomVisitor(sexpVisitor):
     def processForLoop(self, preinit_statements, cond_expr, body_statements, postinit_statements):
         self.emit()
 
-        # 1. Next, emit init statemet(s)
+        # 0. First, hoist out any side-effect type operators.
+        hoisted_stmts, modified_expr = self.maybeHoistSideEffectsFromExpr(cond_expr)
+        self.maybe_emit_hoisted_stmts(hoisted_stmts)
+
+        # 1. Next, emit preinit statemet(s)
+        # NOTE: Multiple preinit statements are allowed in SCI.
         for stmt in preinit_statements:
-            s = self.visit(stmt) + " #sci:forinit"
+            s = self.visit(stmt) + " #sci:forpreinit"
             self.emit(s)
         
         # 2. Next, for loop as while and condition
-        self.emit("while {}: #sci:forcond".format(self.visit(cond_expr)))
-        self.indent_lvl += 1
-        
-        # 3. Next, emit body statement(s)
-        for stmt in body_statements:
-            self.emit(self.visit(stmt))
-        
-        # 4. Next, emit postinit statement(s)
-        for stmt in postinit_statements:
-            s = self.visit(stmt)
-            self.emit(s + " #sci:forpost")
-        
-        self.indent_lvl -= 1
+        self.emit("while {}: #sci:forcond".format(modified_expr))
+
+        with IndentCtx(self):
+            # 3. Next, emit body statement(s)
+            for stmt in body_statements:
+                self.emit(self.visit(stmt))
+
+            # 4. Next, emit postinit statement(s)
+            # NOTE: Multiple postinit statements are allowed in SCI.
+            for stmt in postinit_statements:
+                s = self.visit(stmt)
+                self.emit(s + " #sci:forpostinit")
 
     def processSwitch(self, test_expr, case_arms, optional_else_arm_stmts):
         '''As far as I can tell, SCI case tests should always be a single expression.
@@ -473,41 +477,35 @@ class SexpCustomVisitor(sexpVisitor):
             self.maybe_emit_hoisted_stmts(hoisted_stmts)
             
             self.emit("match {}: #sci:switch (statement form)".format(modified_expr))
-            self.indent_lvl += 1
+            with IndentCtx(self):
+                # BUG: Hacking because somehow TerminalNodes are getting passed in.
+                case_arms = [a for a in case_arms if not isinstance(a, TerminalNode)]
 
-            # Hack because somehow TerminalNodes are getting passed in.
-            case_arms = [a for a in case_arms if not isinstance(a, TerminalNode)]
+                if not case_arms:
+                    # No case arms, so emit a pass statement
+                    self.emit("pass" + " # no sci:case arms present")
+                    return
 
-            if not case_arms:
-                # No case arms, so emit a pass statement
-                self.emit("pass" + " # no sci:case arms present")
-                self.indent_lvl -= 1 # ensure we indent back out.
-                return
+                # Next, iterate and emit each case arm
+                for case_arm in case_arms:
+                    # Pull out key and statement(s) for each case arm
+                    case_key = case_arm.getChild(0).getChild(1)
+                    case_stmts = [c for c in case_arm.getChild(0).getChildren()][2:-1]
 
-            # Next, iterate and emit each case arm
-            for case_arm in case_arms:
-                # Pull out key and statement(s) for each case arm
-                case_key = case_arm.getChild(0).getChild(1)
-                case_stmts = [c for c in case_arm.getChild(0).getChildren()][2:-1]
+                    # 1. First, emit the case arm
+                    self.emit("case {}:".format(self.visit(case_key)))
+
+                    # 2. Next, emit the body statement(s)
+                    with IndentCtx(self):
+                        for stmt in case_stmts:
+                            self.emit(self.visit(stmt))
                 
-                # 1. First, emit the case arm
-                self.emit("case {}:".format(self.visit(case_key)))
-                self.indent_lvl += 1
-
-                # 2. Next, emit the body statement(s)
-                for stmt in case_stmts:
-                    self.emit(self.visit(stmt))
-                
-                self.indent_lvl -= 1
-            
-            # Next, emit the optional else arm
-            if optional_else_arm_stmts is not None:
-                self.emit("case _: #sci:switchelse")
-                self.indent_lvl += 1
-                for stmt in optional_else_arm_stmts:
-                    self.emit(self.visit(stmt))
-                self.indent_lvl -= 1
-            self.indent_lvl -= 1
+                # Next, emit the optional else arm
+                if optional_else_arm_stmts is not None:
+                    self.emit("case _: #sci:switchelse")
+                    with IndentCtx(self):
+                        for stmt in optional_else_arm_stmts:
+                            self.emit(self.visit(stmt))
 
     def processIf(self, ctx, cond_expr, true_stmts, optional_false_stmts):
         if self.peekCtx() == ContextKind.EXPR:
@@ -609,21 +607,20 @@ class SexpCustomVisitor(sexpVisitor):
 
         self.emit("\n@SCI.procedure")
         self.emit("def {}({}):".format(name, ", ".join(norm_params)))
-        self.indent_lvl += 1
 
-        if tmp_params:
-            self.emit("# sci:&tmp => {}".format(", ".join(tmp_params)))
+        with IndentCtx(self):
+            if tmp_params:
+                self.emit("# sci:&tmp => {}".format(", ".join(tmp_params)))
 
-        # Sniff check, for possible argc usage in the body.
-        argc_visitor = ArgCVisitor(self.emit)
-        for stmt in body_statements:
-            argc_visitor.visit(stmt)
+            # Sniff check, for possible argc usage in the body.
+            argc_visitor = ArgCVisitor(self.emit)
+            for stmt in body_statements:
+                argc_visitor.visit(stmt)
 
-        argc_visitor.emit()
-        
-        for stmt in body_statements:
-            self.emit(self.visit(stmt))
-        self.indent_lvl -= 1
+            argc_visitor.emit()
+
+            for stmt in body_statements:
+                self.emit(self.visit(stmt))
 
 def main():
     input_stream = FileStream("sci_files/buildup.sc")

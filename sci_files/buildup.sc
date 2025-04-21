@@ -88,7 +88,10 @@
     ;
     ;return _ret
 
-
+    ; for loop with side-effects in cond_expr
+    (for ((= i 0)) (< (= x 2) 10) ((++ i))
+        (doSomething 3 2 1)
+    )
 	
     ; Nested for loop
     (for ((= i 0)) (< i (- argc 1)) ((++ i))
@@ -132,6 +135,11 @@
         else
             (= x (+ 2 x))
 	    )
+    )
+
+    ; switch that is empty
+    (switch i
+        ; so much empty
     )
 
     ; switch statement/expressions
