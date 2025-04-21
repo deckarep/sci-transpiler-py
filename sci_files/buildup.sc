@@ -21,6 +21,11 @@
     (= i 2)
     (gEgo normal: (= i 0) posn: (+ 75 3) (*= i 152))
 
+    ; if empty
+    (if (< 3 6)
+        ; wow, such empty
+    )
+
     ; if expression open questions
     ; is it possible for if expressions to be multi-statement for the bodies?
 
@@ -40,6 +45,50 @@
         (++ x)
         (++ x)
     )
+
+    ; return statement by itself
+    (return)
+
+    ; return with string atom
+    (return "foo")
+
+    ; return with number atom
+    (return 45)
+
+    ; return with expression
+    (return (+ 3 2))
+
+    ; return with side effects
+    (return (++ x))
+
+    ; return with complex expression
+    (return (if (> 3 1) 20 else 40))
+
+    ; return can have any amount of abitrary statements
+    ; _ret = ... must be used for the final statement of evry branch
+    ;(return
+    ;   (if condA
+    ;        (if condB
+    ;            (foo)
+    ;        else
+    ;            (bar)
+    ;        )
+    ;    else
+    ;        (baz)
+    ;    )
+    ;)
+
+    ;if condA:
+    ;    if condB:
+    ;        _ret = foo()
+    ;    else:
+    ;        _ret = bar()
+    ;else:
+    ;    _ret = baz()
+    ;
+    ;return _ret
+
+
 	
     ; Nested for loop
     (for ((= i 0)) (< i (- argc 1)) ((++ i))
@@ -79,7 +128,7 @@
 	            (= elements (NewList))
             else
                 (= x (+ 2 x))
-	        )
+            )
         else
             (= x (+ 2 x))
 	    )

@@ -35,6 +35,8 @@ def dump(ctx):
 class ContextKind(Enum):
     STMT = 0
     EXPR = 1
+    TMP_EXPR = 3 # when _tmp variable needs to be used.
+    RET_EXPR = 2 # when _ret variable needs to be used.
 
 class ArgCVisitor(sexpVisitor):
     '''This is a non-mutating visitor which checks for the presence of the `argc`
@@ -58,6 +60,16 @@ class ArgCVisitor(sexpVisitor):
         if ctx.getText() == "argc":
             self.uses_argc = True
 
+class IndentCtx:
+    def __init__(self, visitor):
+        self.visitor = visitor
+
+    def __enter__(self):
+        self.visitor.indent_lvl += 1
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.visitor.indent_lvl -= 1
+
 
 class SexpCustomVisitor(sexpVisitor):
     def __init__(self):
@@ -78,6 +90,22 @@ class SexpCustomVisitor(sexpVisitor):
 
     def peekCtx(self):
         return self.context_stack[-1]
+
+    # def get_comments_before(self, ctx, token_stream):
+    #     # Get the start token of this rule
+    #     start = ctx.start.tokenIndex
+
+    #     comments = []
+    #     i = start - 1
+    #     while i >= 0:
+    #         tok = token_stream.tokens[i]
+    #         if tok.channel != Token.HIDDEN_CHANNEL:
+    #             break  # Stop at the first real token before the node
+    #         if tok.type == MyLangLexer.COMMENT:
+    #             comments.insert(0, tok.text.strip())
+    #         i -= 1
+
+    #     return comments
 
     def emit(self, val=None):
         self.emitRaw(val, "\n")
@@ -150,10 +178,12 @@ class SexpCustomVisitor(sexpVisitor):
         elif token == "class":
             self.emit("\n<class declaration>")
         elif token == "return":
-            self.processReturn(ctx.getChild(2))
+            if not isinstance(ctx.getChild(2), TerminalNode):
+                self.processReturn(ctx.getChild(2))
+            else:
+                self.processReturn(None)
         elif token == "if":
             #TODO: this is buggy, it's asumming that there isn't multiline if statements currently.
-
             # 1. Find if we have an else clause
             elseIdx = -1
             for i in range(0, ctx.getChildCount()):
@@ -173,7 +203,7 @@ class SexpCustomVisitor(sexpVisitor):
             # Grab all false statements after the else clause (if present)
             optional_false_stmts = children[elseIdx + 1:-1] if elseIdx != -1 else []
             
-            return self.processIf(cond_expr, true_stmts, optional_false_stmts)
+            return self.processIf(ctx, cond_expr, true_stmts, optional_false_stmts)
         elif token == "break":
             self.emit("break #sci:break")
         elif token == "breakif":
@@ -184,14 +214,20 @@ class SexpCustomVisitor(sexpVisitor):
             self.processContinueIf(ctx.getChild(2))
         elif token == "repeat":
             children = [c for c in ctx.getChildren()]
+            
+            repeat_stmts = children[2:-1]
             self.processRepeatLoop(
-                children[2:-1]
+                repeat_stmts
             )
         elif token == "while":
             children = [c for c in ctx.getChildren()]
+            
+            cond_expr = children[2]
+            while_stmts = children[3:-1]
+            
             self.processWhileLoop(
-                children[2],
-                children[3:-1]
+                cond_expr,
+                while_stmts
             )
         elif token == "switch":
             children = [c for c in ctx.getChildren()]
@@ -205,7 +241,6 @@ class SexpCustomVisitor(sexpVisitor):
                     subchild = child.getChild(0)
                     if subchild.getChildCount() >= 2:
                         maybe_else = subchild.getChild(1)
-                        print(maybe_else.getText(), type(maybe_else))
                         if isinstance(maybe_else, sexpParser.ItemContext) and maybe_else.getText() == "else":
                             elseIdx = childIdx
                             break
@@ -240,25 +275,32 @@ class SexpCustomVisitor(sexpVisitor):
 
             result = "(" + tokenWithSpacing.join(visitedExprs) + ")"
             return result
-        elif token in set(['=', '-=', '+=', '*=', '/=', '%=', '++', '--']):
-            # TODO: For some of these, when they are in expression context I have
-            # to rewrite them using the walrus := operator when it works properly.
-            
+        elif token in set(['=', '-=', '+=', '*=', '/=', '%=', '&=', '|=', '<<=', '>>=', '++', '--']):
             visitedExprs = [self.visit(c) for c in ctx.getChildren()][2:-1]
+
+            INC_STMT = "{} += 1 #sci:++ inc stmt"
+            DEC_STMT = "{} -= 1 #sci:-- dec stmt"
 
             match c := self.peekCtx():
                 case ContextKind.STMT:  
                     # Statement form
                     match t := token:
                         case "++":
-                            return "{} += 1 #sci:++ inc stmt".format(visitedExprs[0])
+                            return INC_STMT.format(visitedExprs[0])
                         case "--":
-                            return "{} -= 1 #sci:-- dec stmt".format(visitedExprs[0])
+                            return DEC_STMT.format(visitedExprs[0])
                         case _:
                             return "{} {} {}".format(visitedExprs[0], t, visitedExprs[1])
                 case ContextKind.EXPR:
                     # Expression form, must produce side-effect statements for these operators.
-                    self.side_effect_stmts.append("{} {} {}".format(visitedExprs[0], token, visitedExprs[1]))
+                    match t := token:
+                        case "++":
+                            self.side_effect_stmts.append(INC_STMT.format(visitedExprs[0]))
+                        case "--":
+                            self.side_effect_stmts.append(DEC_STMT.format(visitedExprs[0]))
+                        case _:
+                            self.side_effect_stmts.append("{} {} {}".format(visitedExprs[0], token, visitedExprs[1]))
+                    # Finally, just return the expression without the unary component.
                     return "{}".format(visitedExprs[0]) 
         else:
             # For now, else will be considered function calls!
@@ -284,12 +326,9 @@ class SexpCustomVisitor(sexpVisitor):
                         # This is a parameter and therefore any expression which
                         # may have side-effects.
                         hoisted_stmts, expr = self.maybeHoistSideEffectsFromExpr(c)
-                        if hoisted_stmts:
-                            for stmt in hoisted_stmts:
-                                self.emit(stmt + " #side-effect op hoisted up as statement")
+                        self.maybe_emit_hoisted_stmts(hoisted_stmts)
                         remaining_components.append(expr)
                 return "{}._send(".format(sender) + ", ".join(remaining_components) + ")" 
-            
             
             # 2. Regular Function call
             # Ensure hoisting occurs for side-effect expressions and process from left to right me thinks.
@@ -298,9 +337,7 @@ class SexpCustomVisitor(sexpVisitor):
             for c in remaining_children:
                 hoisted_stmts, expr = self.maybeHoistSideEffectsFromExpr(c)
                 evaled_params.append(expr)
-                if hoisted_stmts:
-                    for stmt in hoisted_stmts:
-                        self.emit(stmt + " #side-effect op hoisted up as statement")
+                self.maybe_emit_hoisted_stmts(hoisted_stmts)
             return "{}({})".format(token, ", ".join(evaled_params))
     
     def processStmt(self, stmt):
@@ -336,7 +373,7 @@ class SexpCustomVisitor(sexpVisitor):
         self.pushCtx(ContextKind.EXPR)
         expr = self.visit(expr)
         
-        if len(self.side_effect_stmts) > 0:
+        if self.side_effect_stmts:
             stmts = self.side_effect_stmts[:]
             self.side_effect_stmts.clear()
             self.popCtx()
@@ -345,61 +382,54 @@ class SexpCustomVisitor(sexpVisitor):
         self.popCtx()
         return None, expr
 
-    def processContinueIf(self, cond_expr):
-        # 0. First, ensure that the condition expression is not a side-effect expression.
-        hoisted_stmts, modified_expr = self.maybeHoistSideEffectsFromExpr(cond_expr)
+    def maybe_emit_hoisted_stmts(self, hoisted_stmts):
         if hoisted_stmts:
             for stmt in hoisted_stmts:
                 self.emit(stmt + " # side-effect op hoisted up as statement")
 
+    def processContinueIf(self, cond_expr):
+        # 0. First, ensure that the condition expression is not a side-effect expression.
+        hoisted_stmts, modified_expr = self.maybeHoistSideEffectsFromExpr(cond_expr)
+        self.maybe_emit_hoisted_stmts(hoisted_stmts)
+
         # 1. Next, emit continue if condition
         self.emit("if {}: #sci:continueif".format(modified_expr))
-        self.indent_lvl += 1
-        self.emit("continue")
-        self.indent_lvl -= 1
+        with IndentCtx(self):
+            self.emit("continue")
 
     def processBreakIf(self, cond_expr):
         # 0. First, ensure that the condition expression is not a side-effect expression.
         hoisted_stmts, modified_expr = self.maybeHoistSideEffectsFromExpr(cond_expr)
-        if hoisted_stmts:
-            for stmt in hoisted_stmts:
-                self.emit(stmt + " # side-effect op hoisted up as statement")
+        self.maybe_emit_hoisted_stmts(hoisted_stmts)
 
         # 1. Next, emit break if condition
         self.emit("if {}: #sci:breakif".format(modified_expr))
-        self.indent_lvl += 1
-        self.emit("break")
-        self.indent_lvl -= 1
+        with IndentCtx(self):
+            self.emit("break")
 
     def processRepeatLoop(self, body_statements):
-        # 1. Next, for loop as while and condition
+        # 1. SCI repeat loop => Python3 while True loop
         self.emit("while True: #sci:repeat")
-        self.indent_lvl += 1
-        
+                
         # 2. Next, emit body statement(s)
-        for stmt in body_statements:
-            self.emit(self.visit(stmt))
-        
-        self.indent_lvl -= 1
+        with IndentCtx(self):
+            for stmt in body_statements:
+                self.emit(self.visit(stmt))
 
     def processWhileLoop(self, cond_expr, body_statements):
         self.emit()
 
         # 0. First, ensure that the condition expression is not a side-effect expression.
         hoisted_stmts, modified_expr = self.maybeHoistSideEffectsFromExpr(cond_expr)
-        if hoisted_stmts:
-            for stmt in hoisted_stmts:
-                self.emit(stmt + " # side-effect op hoisted up as statement")
+        self.maybe_emit_hoisted_stmts(hoisted_stmts)
 
         # 1. Next, for loop as while and condition
         self.emit("while {}: #sci:whilecond".format(modified_expr))
-        self.indent_lvl += 1
         
         # 2. Next, emit body statement(s)
-        for stmt in body_statements:
-            self.emit(self.visit(stmt))
-        
-        self.indent_lvl -= 1
+        with IndentCtx(self):
+            for stmt in body_statements:
+                self.emit(self.visit(stmt))
 
     def processForLoop(self, preinit_statements, cond_expr, body_statements, postinit_statements):
         self.emit()
@@ -440,9 +470,7 @@ class SexpCustomVisitor(sexpVisitor):
 
             # First, hoist out any side-effect type operators.
             hoisted_stmts, modified_expr = self.maybeHoistSideEffectsFromExpr(test_expr)
-            if hoisted_stmts:
-                for stmt in hoisted_stmts:
-                    self.emit(stmt + " # side-effect op hoisted up as statement")
+            self.maybe_emit_hoisted_stmts(hoisted_stmts)
             
             self.emit("match {}: #sci:switch (statement form)".format(modified_expr))
             self.indent_lvl += 1
@@ -481,7 +509,7 @@ class SexpCustomVisitor(sexpVisitor):
                 self.indent_lvl -= 1
             self.indent_lvl -= 1
 
-    def processIf(self, cond_expr, true_stmts, optional_false_stmts):
+    def processIf(self, ctx, cond_expr, true_stmts, optional_false_stmts):
         if self.peekCtx() == ContextKind.EXPR:
             # TODO: Expression needs to be handled in various styles
             # 1. Use Python3 ternary when the trueBody or elseBody is a single result expression (one line).
@@ -490,15 +518,16 @@ class SexpCustomVisitor(sexpVisitor):
             
             # 1. SCI if-expression => Python3 ternary expression
             # TODO: Python3 expression MUST have an else clause.
-            # I need to figure out what to do when an else is not used.
+            #   I need to figure out what to do when an else is not used.
+            # TODO: Prove that all SCI if expressions have a single statement per true/else bodies.
+            #   Since Python3 if ternary only supports single expression in the true/else bodies.
             assert(len(true_stmts) == 1, "Python3 if expression form requires a single statement")
             assert(len(optional_false_stmts) == 1, "Python3 if expression form requires an else clause")
+            # open file
 
             # First, hoist out side-effect type operators out of cond_expr.
             hoisted_stmts, modified_expr = self.maybeHoistSideEffectsFromExpr(cond_expr)
-            if hoisted_stmts:
-                for stmt in hoisted_stmts:
-                    self.emit(stmt + " # side-effect op hoisted up as statement")
+            self.maybe_emit_hoisted_stmts(hoisted_stmts)
 
             a = true_stmts[0]
             b = optional_false_stmts[0]
@@ -507,27 +536,37 @@ class SexpCustomVisitor(sexpVisitor):
             # 2. SCI if-expression => Python3 if-else statement due to multiple statements!
             # TODO
         else:
+            # Check for comments
+            # This is not working and will need to investigate.
+            # comments = self.get_comments_before(ctx, self.token_stream)
+            # for comment in comments:
+            #     self.emit(f"# {comment}")
+
             # Do statement form
             hoisted_stmts, new_cond_expr = self.maybeHoistSideEffectsFromExpr(cond_expr)
-            if hoisted_stmts:
-                for stmt in hoisted_stmts:
-                    self.emit(stmt + " # side-effect op hoisted up as statement")
+            self.maybe_emit_hoisted_stmts(hoisted_stmts)
             self.emit("if {}:".format(new_cond_expr))
-            self.indent_lvl += 1
-            for stmt in true_stmts:
-                self.emit(self.visit(stmt))
-            self.indent_lvl -= 1
 
-            if optional_false_stmts:
-                self.emit("else:")
-                self.indent_lvl += 1
-                for stmt in optional_false_stmts:
-                    self.emit(self.visit(stmt))
-                self.indent_lvl -= 1
-        
+            if not true_stmts:
+                # No true statements, so emit a pass statement
+                with IndentCtx(self):
+                    self.emit("pass")
+            else:
+                # Emit the true statements
+                with IndentCtx(self):
+                    for stmt in true_stmts:
+                        self.emit(self.visit(stmt))
+
+                # If we have an else clause, then emit it.
+                if optional_false_stmts:
+                    self.emit("else:")
+                    with IndentCtx(self):
+                        for stmt in optional_false_stmts:
+                            self.emit(self.visit(stmt))
+
     def processReturn(self, optionalExp):
         if optionalExp is not None:
-            if isinstance(optionalExp.getChild(0), sexpParser.AtomContext):
+            if isinstance(optionalExp, sexpParser.AtomContext):
                 # Return value is a scalar (atom)
                 self.pushCtx(ContextKind.EXPR)
                 self.emit("return ({})".format(self.visit(optionalExp)))
@@ -535,15 +574,15 @@ class SexpCustomVisitor(sexpVisitor):
             else:
                 # Return value is a more complex expression so needs paranthesis
                 hoisted_stmts, ret_expr = self.maybeHoistSideEffectsFromExpr(optionalExp)
-                if hoisted_stmts:
-                    for stmt in hoisted_stmts:
-                        self.emit(stmt + " # side-effect op hoisted up as statement")
+                self.maybe_emit_hoisted_stmts(hoisted_stmts)
                 self.emit("return {}".format(ret_expr))
         else:
             # No return value
             self.emit("return")
 
     def extractNormalParams(self, parameters):
+        '''Extracts all normal function parameters up until any potential
+        &tmp delimiter that may be present'''
         try:
             tmp_idx = parameters.index("&tmp")
         except ValueError:
@@ -551,6 +590,8 @@ class SexpCustomVisitor(sexpVisitor):
         return parameters[0:tmp_idx]
 
     def extractTmpParams(self, parameters):
+        '''Extracts all &tmp parameters that SCI requires but are fully uncessary
+        in Python-land. However, these become emitted as comments to aid in debugging'''
         try:
             tmp_idx = parameters.index("&tmp")
         except ValueError:
