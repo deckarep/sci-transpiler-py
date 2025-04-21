@@ -35,6 +35,37 @@
     ; if expression with side-effects
     (gMessager say: 1 0 (if (= x (hide 2 3)) 9 else 8) 0 self)
 
+    ; if statement only true body
+    (if (not elements)
+        (hello "King Graham")
+    )
+
+    ; if statement empty true
+    (if (not elements)
+        ; nothing
+    )
+
+    ; if statement empty true and else
+    (if (not elements)
+        ; nothing
+    else
+        ;nothing else
+    )
+
+     ; if statement w/true empty else
+    (if (not elements)
+        (sayHi "hi")
+    else
+        ; nothing
+    )
+
+    ; if statement empty true else w/ stmts
+    (if (not elements)
+        ; nothing
+    else
+        (sayHi "hi")
+    )
+
     ; if statement multiline
     (if (not elements)
         (++ y)
@@ -102,6 +133,11 @@
         )
 	)
 
+    ; traditional while loop - empty body
+    (while (and (foo 23) (bar 7))
+        ; wow, such empty
+    )
+
     ; traditional while loop
     (while (< 3 (*= n 2))
         (++ y)
@@ -109,6 +145,11 @@
         (if (not elements)
 	        (= elements (NewList))
 	    )
+    )
+
+    ; repeat loop empty
+    (repeat
+        ; nothing to see here
     )
 
     ; repeat loop

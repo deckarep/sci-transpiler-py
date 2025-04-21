@@ -172,8 +172,9 @@ class SexpCustomVisitor(sexpVisitor):
                 return
 
             body_statements = [c for c in ctx.getChildren()][3:-1]
+            parameters = [c.getText() for c in ctx.getChild(2).getChild(0).getChildren()][2:-1]
             self.processProcedure(proc_name, 
-                [c.getText() for c in ctx.getChild(2).getChild(0).getChildren()][2:-1], 
+                parameters,
                 body_statements)
         elif token == "class":
             self.emit("\n<class declaration>")
@@ -203,7 +204,11 @@ class SexpCustomVisitor(sexpVisitor):
             # Grab all false statements after the else clause (if present)
             optional_false_stmts = children[elseIdx + 1:-1] if elseIdx != -1 else []
             
-            return self.processIf(ctx, cond_expr, true_stmts, optional_false_stmts)
+            # Edge case: still generate an empty else pass block if there were no
+            # else statements but an else terminal was present.
+            gen_empty_else = not optional_false_stmts and elseIdx != -1
+
+            return self.processIf(ctx, gen_empty_else, cond_expr, true_stmts, optional_false_stmts)
         elif token == "break":
             self.emit("break #sci:break")
         elif token == "breakif":
@@ -413,8 +418,11 @@ class SexpCustomVisitor(sexpVisitor):
                 
         # 2. Next, emit body statement(s)
         with IndentCtx(self):
-            for stmt in body_statements:
-                self.emit(self.visit(stmt))
+            if not body_statements:
+                self.emit("pass #sci:repeatpass")
+            else:
+                for stmt in body_statements:
+                    self.emit(self.visit(stmt))
 
     def processWhileLoop(self, cond_expr, body_statements):
         self.emit()
@@ -428,8 +436,11 @@ class SexpCustomVisitor(sexpVisitor):
         
         # 2. Next, emit body statement(s)
         with IndentCtx(self):
-            for stmt in body_statements:
-                self.emit(self.visit(stmt))
+            if not body_statements:
+                self.emit("pass #sci:whilepass")
+            else:
+                for stmt in body_statements:
+                    self.emit(self.visit(stmt))
 
     def processForLoop(self, preinit_statements, cond_expr, body_statements, postinit_statements):
         self.emit()
@@ -507,7 +518,7 @@ class SexpCustomVisitor(sexpVisitor):
                         for stmt in optional_else_arm_stmts:
                             self.emit(self.visit(stmt))
 
-    def processIf(self, ctx, cond_expr, true_stmts, optional_false_stmts):
+    def processIf(self, ctx, gen_empty_else, cond_expr, true_stmts, optional_false_stmts):
         if self.peekCtx() == ContextKind.EXPR:
             # TODO: Expression needs to be handled in various styles
             # 1. Use Python3 ternary when the trueBody or elseBody is a single result expression (one line).
@@ -555,12 +566,18 @@ class SexpCustomVisitor(sexpVisitor):
                     for stmt in true_stmts:
                         self.emit(self.visit(stmt))
 
-                # If we have an else clause, then emit it.
-                if optional_false_stmts:
-                    self.emit("else:")
-                    with IndentCtx(self):
-                        for stmt in optional_false_stmts:
-                            self.emit(self.visit(stmt))
+            # If we have an else clause, then emit it.
+            if optional_false_stmts:
+                self.emit("else:")
+                with IndentCtx(self):
+                    for stmt in optional_false_stmts:
+                        self.emit(self.visit(stmt))
+
+            # If we else was defined, but no statments generate a pass for else.
+            if gen_empty_else:
+                self.emit("else:")
+                with IndentCtx(self):
+                    self.emit("pass")
 
     def processReturn(self, optionalExp):
         if optionalExp is not None:
@@ -613,12 +630,15 @@ class SexpCustomVisitor(sexpVisitor):
                 self.emit("# sci:&tmp => {}".format(", ".join(tmp_params)))
 
             # Sniff check, for possible argc usage in the body.
+            # This dispatches to another non-mutating visitor that walks
+            # the body looking for any argc references.
             argc_visitor = ArgCVisitor(self.emit)
             for stmt in body_statements:
                 argc_visitor.visit(stmt)
-
+            # Emit the argc preamble statment if needed.
             argc_visitor.emit()
 
+            # Actually process the body statements with the this self visitor.
             for stmt in body_statements:
                 self.emit(self.visit(stmt))
 
