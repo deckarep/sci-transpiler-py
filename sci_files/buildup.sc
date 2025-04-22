@@ -119,6 +119,11 @@
     ;
     ;return _ret
 
+    ; TODO: for loop issue
+    ; Currently c-style for loops compile to Python while True
+    ; If the c-style has a continue, the Python while postinit
+    ; will be skipped but it should be run always.
+
     ; for loop with side-effects in cond_expr
     (for ((= i 0)) (< (= x 2) 10) ((++ i))
         (doSomething 3 2 1)
@@ -229,6 +234,22 @@
     ; statement must be captured in a tmp var per arm
     ; and the entire logic must be hoisted above expression
     ; TODO
+
+    ;basic cond
+    (cond
+        ((< (gEgo x:) 100)
+            (Prints "You're on the left side of the screen")
+            (say "Hi Larry!")
+        )
+        ((> (gEgo x:) 220)
+            (Prints "You're on the right side of the screen")
+            (say "Hi Patty!")
+        )
+        (else
+            (++ y)
+            (++ x)
+        )
+    )
 
 	(return -info-:)
 )

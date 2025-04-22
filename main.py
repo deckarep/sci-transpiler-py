@@ -179,13 +179,16 @@ class SexpCustomVisitor(sexpVisitor):
         elif token == "class":
             self.emit("\n<class declaration>")
         elif token == "return":
-            if not isinstance(ctx.getChild(2), TerminalNode):
-                self.processReturn(ctx.getChild(2))
-            else:
+            ch = ctx.getChild(2)
+            if isinstance(ch, TerminalNode):
+                # No return value, just the statement isolated.
                 self.processReturn(None)
+            else:
+                # We must have a return value/expression.
+                ret_expr = ch
+                self.processReturn(ret_expr)
         elif token == "if":
-            #TODO: this is buggy, it's asumming that there isn't multiline if statements currently.
-            # 1. Find if we have an else clause
+            # 1. Figure out if we have an else clause
             elseIdx = -1
             for i in range(0, ctx.getChildCount()):
                 c = ctx.getChild(i)
@@ -199,6 +202,7 @@ class SexpCustomVisitor(sexpVisitor):
             
             # Grab condition right after if token
             cond_expr = ctx.getChild(2)
+
             # Grab all true statements up until the else clause
             true_stmts = children[3:elseIdx] if elseIdx != -1 else children[3:-1]
             # Grab all false statements after the else clause (if present)
@@ -214,16 +218,18 @@ class SexpCustomVisitor(sexpVisitor):
         elif token == "breakif":
             self.processBreakIf(ctx.getChild(2))
         elif token == "continue":
+            # TODO: When inside a while loop, we must prepend the postinit statement(s)
+            # in order to ensure that they run should the loop continue.
             self.emit("continue #sci:continue")
         elif token == "contif":
+            # TODO: When inside a while loop, we must prepend the postinit statement(s)
+            # in order to ensure that they run should the loop continue.
             self.processContinueIf(ctx.getChild(2))
         elif token == "repeat":
             children = [c for c in ctx.getChildren()]
             
             repeat_stmts = children[2:-1]
-            self.processRepeatLoop(
-                repeat_stmts
-            )
+            self.processRepeatLoop(repeat_stmts)
         elif token == "while":
             children = [c for c in ctx.getChildren()]
             
@@ -264,7 +270,29 @@ class SexpCustomVisitor(sexpVisitor):
                 optional_else_arm_stmts    
             )
         elif token == "cond":
-            return "cond <cond1> <cond2> ... { <case1> <case2> ... }"
+            # NOTE: conds are just a glorified if/elif/else chain...pfft.
+            children = [c for c in ctx.getChildren()]
+
+            # Find an optional else clause
+            elseIdx = -1
+            childIdx = 0
+            for child in children:
+                # Defensive: make sure this child has the shape you expect
+                if child.getChildCount() >= 1:
+                    subchild = child.getChild(0)
+                    if subchild.getChildCount() >= 2:
+                        maybe_else = subchild.getChild(1)
+                        if isinstance(maybe_else, sexpParser.ItemContext) and maybe_else.getText() == "else":
+                            elseIdx = childIdx
+                            break
+                childIdx +=1
+
+            case_arms = children[2:elseIdx] if elseIdx != -1 else children[3:]
+            optional_else_arm_stmts = None
+            if elseIdx != -1:
+                optional_else_arm_stmts = [c for c in children[elseIdx].getChild(0).getChildren()][2:-1]
+
+            return self.processCond(case_arms, optional_else_arm_stmts)
         elif token == "for":
             children = [c for c in ctx.getChildren()]
             self.processForLoop([c for c in ctx.getChild(2).getChild(0).getChildren()][1:-1], 
@@ -514,6 +542,48 @@ class SexpCustomVisitor(sexpVisitor):
                 # Next, emit the optional else arm
                 if optional_else_arm_stmts is not None:
                     self.emit("case _: #sci:switchelse")
+                    with IndentCtx(self):
+                        for stmt in optional_else_arm_stmts:
+                            self.emit(self.visit(stmt))
+
+    def processCond(self, cond_arms, optional_else_arm_stmts):
+        if self.peekCtx() == ContextKind.EXPR:
+            return "(cond-expression TODO)"
+        else:
+            # SCI cond statement => Python3 if/elif,else statements
+            # hoisted_stmts, modified_expr = self.maybeHoistSideEffectsFromExpr(cond_expr)
+            # self.maybe_emit_hoisted_stmts(hoisted_stmts)
+
+                # BUG: Hacking because somehow TerminalNodes are getting passed in.
+                cond_arms = [a for a in cond_arms if not isinstance(a, TerminalNode)]
+
+                # TODO: emptyness?
+                # if not cond_arms:
+                #     # No case arms, so emit a pass statement
+                #     self.emit("pass" + " # no sci:cond arms present")
+                #     return
+
+                for idx, cond_arm in enumerate(cond_arms):
+                    # Pull out key and statement(s) for each case arm
+                    cond_arm_expr = cond_arm.getChild(0).getChild(1)
+                    case_stmts = [c for c in cond_arm.getChild(0).getChildren()][2:-1]
+
+                    # 1. First, emit the case arm
+                    if idx == 0:
+                        # First case arm is the first if statement
+                        self.emit("if {}: # sci:condarm".format(self.visit(cond_arm_expr)))
+                    else:
+                        # All other case arms are elif statements
+                        self.emit("elif {}: # sci:condarm".format(self.visit(cond_arm_expr)))
+
+                    # 2. Next, emit the body statement(s)
+                    with IndentCtx(self):
+                        for stmt in case_stmts:
+                            self.emit(self.visit(stmt))
+
+                # Next, emit the optional else arm
+                if optional_else_arm_stmts is not None:
+                    self.emit("else: #sci:condelse")
                     with IndentCtx(self):
                         for stmt in optional_else_arm_stmts:
                             self.emit(self.visit(stmt))
