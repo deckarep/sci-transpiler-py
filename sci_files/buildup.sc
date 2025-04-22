@@ -17,6 +17,9 @@
 )
 
 (procedure (mega x y z &tmp i j)
+    ; if expression with multiple elif
+    (= x (if (Open 17) 2 else (if (Open 22) 3 else (if (Open 25) 7 else 9))))
+
     ; cascade send call
     (= i 2)
     (gEgo normal: (= i 0) posn: (+ 75 3) (*= i 152))

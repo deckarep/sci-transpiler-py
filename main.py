@@ -15,6 +15,8 @@ from scicomp.sexpLexer import sexpLexer
 from scicomp.sexpParser import sexpParser
 from scicomp.sexpVisitor import sexpVisitor
 
+# See the Moonscript compiler for how to wrestle control-flow statements into expressions
+
 # Notes: given any ctx, you can get the parent context using ctx.parentCtx
 # Notes: if you're at the root, then parentCtx is None.
 # Example: go up two levels and spit out the text.
@@ -287,11 +289,12 @@ class SexpCustomVisitor(sexpVisitor):
                             break
                 childIdx +=1
 
-            case_arms = children[2:elseIdx] if elseIdx != -1 else children[2:]
+            cond_arms = children[2:elseIdx] if elseIdx != -1 else children[2:]
             optional_else_arm_stmts = None
             if elseIdx != -1:
                 optional_else_arm_stmts = [c for c in children[elseIdx].getChild(0).getChildren()][2:-1]
-            return self.processCond(case_arms, optional_else_arm_stmts)
+
+            return self.processCond(cond_arms, optional_else_arm_stmts)
         elif token == "for":
             children = [c for c in ctx.getChildren()]
             self.processForLoop([c for c in ctx.getChild(2).getChild(0).getChildren()][1:-1], 
@@ -308,32 +311,38 @@ class SexpCustomVisitor(sexpVisitor):
             result = "(" + tokenWithSpacing.join(visitedExprs) + ")"
             return result
         elif token in set(['=', '-=', '+=', '*=', '/=', '%=', '&=', '|=', '<<=', '>>=', '++', '--']):
-            visitedExprs = [self.visit(c) for c in ctx.getChildren()][2:-1]
+            children = [c for c in ctx.getChildren()][2:-1]
 
             INC_STMT = "{} += 1 #sci:++ inc stmt"
             DEC_STMT = "{} -= 1 #sci:-- dec stmt"
 
             match c := self.peekCtx():
-                case ContextKind.STMT:  
-                    # Statement form
-                    match t := token:
-                        case "++":
-                            return INC_STMT.format(visitedExprs[0])
-                        case "--":
-                            return DEC_STMT.format(visitedExprs[0])
-                        case _:
-                            return "{} {} {}".format(visitedExprs[0], t, visitedExprs[1])
                 case ContextKind.EXPR:
                     # Expression form, must produce side-effect statements for these operators.
                     match t := token:
                         case "++":
-                            self.side_effect_stmts.append(INC_STMT.format(visitedExprs[0]))
+                            self.side_effect_stmts.append(INC_STMT.format(self.visit(children[0])))
                         case "--":
-                            self.side_effect_stmts.append(DEC_STMT.format(visitedExprs[0]))
+                            self.side_effect_stmts.append(DEC_STMT.format(self.visit(children[0])))
                         case _:
-                            self.side_effect_stmts.append("{} {} {}".format(visitedExprs[0], token, visitedExprs[1]))
+                            self.pushCtx(ContextKind.EXPR)
+                            rhs = self.visit(children[1])
+                            self.popCtx()
+                            self.side_effect_stmts.append("{} {} {}".format(self.visit(children[0]), token, rhs))
                     # Finally, just return the expression without the unary component.
-                    return "{}".format(visitedExprs[0]) 
+                    return "{}".format(self.visit(children[0]))
+                case ContextKind.STMT:
+                    # Statement form
+                    match t := token:
+                        case "++":
+                            return INC_STMT.format(self.visit(children[0]))
+                        case "--":
+                            return DEC_STMT.format(self.visit(children[0]))
+                        case _:
+                            self.pushCtx(ContextKind.EXPR)
+                            rhs = self.visit(children[1])
+                            self.popCtx()
+                            return "{} {} {}".format(self.visit(children[0]), t, rhs)
         else:
             # For now, else will be considered function calls!
             # Rewrite rules
@@ -599,9 +608,8 @@ class SexpCustomVisitor(sexpVisitor):
             #   I need to figure out what to do when an else is not used.
             # TODO: Prove that all SCI if expressions have a single statement per true/else bodies.
             #   Since Python3 if ternary only supports single expression in the true/else bodies.
-            assert(len(true_stmts) == 1, "Python3 if expression form requires a single statement")
-            assert(len(optional_false_stmts) == 1, "Python3 if expression form requires an else clause")
-            # open file
+            assert len(true_stmts) == 1, "Python3 if expression form requires a single statement"
+            assert len(optional_false_stmts) == 1, "Python3 if expression form requires an else clause"
 
             # First, hoist out side-effect type operators out of cond_expr.
             hoisted_stmts, modified_expr = self.maybeHoistSideEffectsFromExpr(cond_expr)
