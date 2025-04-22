@@ -287,11 +287,10 @@ class SexpCustomVisitor(sexpVisitor):
                             break
                 childIdx +=1
 
-            case_arms = children[2:elseIdx] if elseIdx != -1 else children[3:]
+            case_arms = children[2:elseIdx] if elseIdx != -1 else children[2:]
             optional_else_arm_stmts = None
             if elseIdx != -1:
                 optional_else_arm_stmts = [c for c in children[elseIdx].getChild(0).getChildren()][2:-1]
-
             return self.processCond(case_arms, optional_else_arm_stmts)
         elif token == "for":
             children = [c for c in ctx.getChildren()]

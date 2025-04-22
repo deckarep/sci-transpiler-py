@@ -251,6 +251,13 @@
         )
     )
 
+    ; basic cond no else
+    (cond
+        ((< (gEgo x:) 100)
+            (say "Hi Al")
+        )
+    )
+
 	(return -info-:)
 )
 
